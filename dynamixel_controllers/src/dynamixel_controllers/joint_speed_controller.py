@@ -42,6 +42,10 @@ __license__ = 'BSD'
 __maintainer__ = 'Antons Rebguns'
 __email__ = 'anton@email.arizona.edu'
 
+__license__ = 'BSD'
+__maintainer__ = 'Oscar Lima'
+__email__ = 'olima@isr.tecnico.ulisboa.pt'
+
 import rospy
 
 from dynamixel_driver.dynamixel_const import *
@@ -59,6 +63,11 @@ class JointSpeedController(JointController):
         self.min_angle_treshold = rospy.get_param(self.controller_namespace + '/motor/minAngle')
         self.max_angle_treshold = rospy.get_param(self.controller_namespace + '/motor/maxAngle')
 
+        # ensure max angle is greater than min
+        if not self.min_angle_treshold < self.max_angle_treshold:
+            rospy.logfatal('minAngle cannot be smaller than maxAngle, fix input params!')
+            sys.exit(1)
+
         if rospy.has_param(self.controller_namespace + '/motor/acceleration'):
             self.acceleration = rospy.get_param(self.controller_namespace + '/motor/acceleration')
         else:
@@ -66,6 +75,10 @@ class JointSpeedController(JointController):
 
         self.flipped = self.min_angle_raw > self.max_angle_raw
         self.joint_state = JointState(name=self.joint_name, motor_ids=[self.motor_id])
+        # variable used to store the commanded speed, received in the process_command() callback
+        self.target_raw_speed = None
+        # to store when user calls service to disable motor torque
+        self.torque_enable = None
 
 
     def initialize(self):
@@ -94,6 +107,7 @@ class JointSpeedController(JointController):
         self.ENCODER_RESOLUTION = rospy.get_param('dynamixel/%s/%d/encoder_resolution' % (self.port_namespace, self.motor_id))
         self.MAX_POSITION = self.ENCODER_RESOLUTION - 1
         self.VELOCITY_PER_TICK = rospy.get_param('dynamixel/%s/%d/radians_second_per_encoder_tick' % (self.port_namespace, self.motor_id))
+        # max/min velocity gets read from the motor through serial port automatically for you by dynamixel_serial_proxy.py
         self.MAX_VELOCITY = rospy.get_param('dynamixel/%s/%d/max_velocity' % (self.port_namespace, self.motor_id))
         self.MIN_VELOCITY = self.VELOCITY_PER_TICK
 
@@ -113,12 +127,6 @@ class JointSpeedController(JointController):
         if self.joint_speed < self.MIN_VELOCITY: self.joint_speed = self.MIN_VELOCITY
         elif self.joint_speed > self.joint_max_speed: self.joint_speed = self.joint_max_speed
 
-        self.set_speed(self.joint_speed)
-        self.dxl_io.set_speed(self.motor_id, 0)
-
-        #self.max_angle_treshold = self.raw_to_rad(self.max_angle_treshold, self.initial_position_raw, self.flipped, self.RADIANS_PER_ENCODER_TICK)
-        #self.min_angle_treshold = self.raw_to_rad(self.min_angle_treshold, self.initial_position_raw, self.flipped, self.RADIANS_PER_ENCODER_TICK)
-
         return True
 
 
@@ -129,6 +137,9 @@ class JointSpeedController(JointController):
 
 
     def spd_rad_to_raw(self, spd_rad):
+        '''
+        Convert speed in radians/sec to raw
+        '''
         # include negative values for direction
         # if spd_rad < self.MIN_VELOCITY: spd_rad = self.MIN_VELOCITY
         # elif spd_rad > self.joint_max_speed: spd_rad = self.joint_max_speed
@@ -159,12 +170,13 @@ class JointSpeedController(JointController):
 
 
     def set_torque_enable(self, torque_enable):
+        self.torque_enable = torque_enable
         mcv = (self.motor_id, torque_enable)
         self.dxl_io.set_multi_torque_enabled([mcv])
 
 
-    def set_speed(self, speed):
-        mcv = (self.motor_id, self.spd_rad_to_raw(speed))
+    def set_speed(self, raw_speed):
+        mcv = (self.motor_id, raw_speed)
         self.dxl_io.set_multi_speed([mcv])
 
 
@@ -206,6 +218,9 @@ class JointSpeedController(JointController):
 
 
     def process_motor_states(self, state_list):
+        '''
+        This function gets called upon a motor state msg received
+        '''
         if self.running:
             state = filter(lambda state: state.id == self.motor_id, state_list.motor_states)
             if state:
@@ -221,40 +236,42 @@ class JointSpeedController(JointController):
                 self.joint_angle_raw = state.position
                 self.joint_state_pub.publish(self.joint_state)
 
-                # Encoder position and tick velocity based limitation
-                if (self.max_angle_treshold != self.min_angle_treshold):
-                    if (self.joint_state.velocity > 0 and  abs(self.max_angle_treshold - 100) <  (state.position + state.speed * 1.0/20.0) ):
-                        print "Joint reach its limit "  + str(self.max_angle_treshold) + " at " + str(state.position) + " state speed " + str(state.speed)
+                # enable motor speed ctrl if there is a setpoint and user intents to have torque on the motor
+                if self.torque_enable == False or self.target_raw_speed == None:
+                    return
+                else:
+                    # based on experiments we have determined this tolerance is good!
+                    tolerance = int(self.target_raw_speed)
+                    # check if joint has reached limits
+                    if state.position + tolerance > self.max_angle_treshold and self.target_raw_speed > 0:
+                        # positive vel, joint has reached upper limit
+                        print "Joint %d reached its upper limit "% self.motor_id  + str(self.max_angle_treshold) + " at " + str(state.position) + " vel " + str(state.speed)
+                        # set vel to 0
+                        print "Setting speed joint to 0 to prevent collision!"
                         self.dxl_io.set_speed(self.motor_id, 0)
-                        self.at_max_angle = True
-                    elif self.joint_state.velocity != 0 :
-                        self.at_max_angle = False
-
-                    if (self.joint_state.velocity < 0 and abs(self.min_angle_treshold +100) > (state.position + state.speed * 1.0/20.0) ):
-                        print "Joint reach its limit " + str(self.min_angle_treshold) + " at " + str(state.position) + " vel " + str(state.speed)
+                        return
+                    elif state.position > self.max_angle_treshold and self.target_raw_speed < 0:
+                        print "Setting user speed (negative only) joint %d got out of joint limits"% self.motor_id
+                        self.dxl_io.set_speed(self.motor_id, self.target_raw_speed)
+                        return
+                    elif state.position + tolerance < self.min_angle_treshold and self.target_raw_speed < 0:
+                        # negative vel has reached lower joint limit
+                        print "Joint %d reach its lower limit "% self.motor_id + str(self.min_angle_treshold) + " at " + str(state.position) + " vel " + str(state.speed)
+                        # set vel to 0
+                        print "Setting speed joint %d to 0 to prevent collision!"% self.motor_id
                         self.dxl_io.set_speed(self.motor_id, 0)
-                        self.at_min_angle = True
-                    elif self.joint_state.velocity != 0 :
-                        self.at_min_angle = False
-
-# radian and radian/sec based limitation
-#                 if (self.joint_state.velocity > 0 and  abs(self.max_angle_treshold - (state.position + state.speed * 1.0/20.0))  < 10):
-#                     print "Joint reach its limit "  + str(self.max_angle_treshold) + " at " + str(self.joint_state.current_pos) + " state speed " + str(self.joint_state.velocity)
-#                     self.dxl_io.set_speed(self.motor_id, 0)
-#                     self.at_max_angle = True
-#                 elif self.joint_state.velocity != 0 :
-#                     self.at_max_angle = False
-#
-#                 if (self.joint_state.velocity < 0 and abs(self.min_angle_treshold - (self.joint_state.current_pos + self.joint_state.velocity * 1.0/20.0)) < 0.052 ):
-#                     print "Joint reach its limit " + str(self.min_angle_treshold) + " at " + str(self.joint_state.current_pos) + " vel " + str(self.joint_state.velocity)
-#                     self.dxl_io.set_speed(self.motor_id, 0)
-#                     self.at_min_angle = True
-#                 elif self.joint_state.velocity != 0 :
-#                     self.at_min_angle = False
+                    elif state.position < self.min_angle_treshold and self.target_raw_speed > 0:
+                        print "Setting user speed (positive only) joint %d got out of joint limits"% self.motor_id
+                        self.dxl_io.set_speed(self.motor_id, self.target_raw_speed)
+                    else:
+                        # set user speed, allow both positive and negative speed
+                        print "Setting user speed, allow positive and negative"
+                        self.dxl_io.set_speed(self.motor_id, self.target_raw_speed)
 
 
     def process_command(self, msg):
-        speed = self.spd_rad_to_raw(msg.data)
-        print speed
-        mcv = (self.motor_id, speed)
-        self.dxl_io.set_speed(self.motor_id, speed)
+        '''
+        Callback for the received speed command
+        '''
+        self.torque_enable = True
+        self.target_raw_speed = self.spd_rad_to_raw(msg.data)
