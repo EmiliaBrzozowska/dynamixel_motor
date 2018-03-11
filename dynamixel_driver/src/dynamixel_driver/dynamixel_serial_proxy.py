@@ -184,7 +184,7 @@ class SerialProxy():
                     model_number = self.dxl_io.get_model_number(motor_id)
                     self.__fill_motor_parameters(motor_id, model_number)
                 except Exception as ex:
-                    rospy.logerr('Exception thrown while getting attributes for motor %d - %s' % (motor_id, ex))
+                    # rospy.logerr('Exception thrown while getting attributes for motor %d - %s' % (motor_id, ex))
                     if trial == self.num_ping_retries - 1: to_delete_if_error.append(motor_id)
                     continue
                     
@@ -192,6 +192,7 @@ class SerialProxy():
                 break
                 
         for motor_id in to_delete_if_error:
+            rospy.logerr('Motor %d  did not responded after pinging several times, you will not be able to use it...!'% motor_id)
             self.motors.remove(motor_id)
             
         rospy.set_param('dynamixel/%s/connected_ids' % self.port_namespace, self.motors)
