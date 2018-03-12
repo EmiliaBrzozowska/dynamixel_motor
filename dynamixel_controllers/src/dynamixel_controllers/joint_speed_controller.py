@@ -247,7 +247,6 @@ class JointSpeedController(JointController):
                         # positive vel, joint has reached upper limit
                         print "Joint %d reached its upper limit "% self.motor_id  + str(self.max_angle_treshold) + " at " + str(state.position) + " vel " + str(state.speed)
                         # set vel to 0
-                        print "Setting speed joint to 0 to prevent collision!"
                         self.dxl_io.set_speed(self.motor_id, 0)
                         return
                     elif state.position > self.max_angle_treshold and self.target_raw_speed < 0:
@@ -258,14 +257,12 @@ class JointSpeedController(JointController):
                         # negative vel has reached lower joint limit
                         print "Joint %d reach its lower limit "% self.motor_id + str(self.min_angle_treshold) + " at " + str(state.position) + " vel " + str(state.speed)
                         # set vel to 0
-                        print "Setting speed joint %d to 0 to prevent collision!"% self.motor_id
                         self.dxl_io.set_speed(self.motor_id, 0)
                     elif state.position < self.min_angle_treshold and self.target_raw_speed > 0:
                         print "Setting user speed (positive only) joint %d got out of joint limits"% self.motor_id
                         self.dxl_io.set_speed(self.motor_id, self.target_raw_speed)
                     else:
                         # set user speed, allow both positive and negative speed
-                        print "Setting user speed, allow positive and negative"
                         self.dxl_io.set_speed(self.motor_id, self.target_raw_speed)
 
 
