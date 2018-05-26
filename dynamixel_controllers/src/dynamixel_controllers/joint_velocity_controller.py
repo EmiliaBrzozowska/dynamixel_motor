@@ -185,15 +185,13 @@ class JointSpeedController(JointController):
         callback to receive the std_msgs/Float64 command with desired motor speed (in rad/s^2)
         '''
         speed = msg.data
-        rospy.logdebug('moving motor with speed = '%speed)
+        rospy.logdebug('moving motor with speed = %f'%speed)
 
         # check if user has requested to stop motor
         if abs(speed) < 0.00001:
             rospy.logdebug('received request to stop motor')
-            if self.previous_speed < 0.0:
-                speed = -1.0
-            else:
-                speed = 1.0
+            # set speed to a big value to avoid small motor movement after reaching position
+            speed = 1.0
             try:
                 # use dynamixel io to query current motor position
                 angle = self.dxl_io.get_feedback(self.motor_id)['position']
@@ -216,4 +214,3 @@ class JointSpeedController(JointController):
 
         # keep a history of the previous commanded speed to ??
         self.previous_speed = speed
-
